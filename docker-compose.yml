@@ -1,0 +1,136 @@
+services:
+  # ============================================
+  # CRÉDIT DU SAHARA (Émetteur)
+  # ============================================
+  
+  mysql.credit_sahara:
+    image: mysql:8.0.33
+    container_name: mysql_credit_sahara
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root_credit_sahara
+      MYSQL_DATABASE: credit_sahara_db
+      MYSQL_USER: app_credit_sahara
+      MYSQL_PASSWORD: app_credit_sahara_pass
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./credit_sahara/mysql_data:/var/lib/mysql
+      - ./credit_sahara/sql:/docker-entrypoint-initdb.d
+    networks:
+      - wassel_network
+
+  app.credit_sahara:
+    image: php:8.2-fpm
+    container_name: app_credit_sahara
+    restart: unless-stopped
+    working_dir: /var/www/html
+    volumes:
+      - ./credit_sahara/app:/var/www/html
+      - ./credit_sahara/keys:/var/www/html/keys
+    ports:
+      - "8000:8000"
+    depends_on:
+      - mysql.credit_sahara
+    networks:
+      - wassel_network
+    command: bash -c "php -S 0.0.0.0:8000 -t /var/www/html/public 2>&1"
+
+  # ============================================
+  # NOOR BANK (Récepteur)
+  # ============================================
+
+  mysql.noor_bank:
+    image: mysql:8.0.33
+    container_name: mysql_noor_bank
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root_noor_bank
+      MYSQL_DATABASE: noor_bank_db
+      MYSQL_USER: app_noor_bank
+      MYSQL_PASSWORD: app_noor_bank_pass
+    ports:
+      - "3307:3306"
+    volumes:
+      - ./noor_bank/mysql_data:/var/lib/mysql
+      - ./noor_bank/sql:/docker-entrypoint-initdb.d
+    networks:
+      - wassel_network
+
+  app.noor_bank:
+    image: php:8.2-fpm
+    container_name: app_noor_bank
+    restart: unless-stopped
+    working_dir: /var/www/html
+    volumes:
+      - ./noor_bank/app:/var/www/html
+      - ./noor_bank/keys:/var/www/html/keys
+    ports:
+      - "8001:8000"
+    depends_on:
+      - mysql.noor_bank
+    networks:
+      - wassel_network
+    command: bash -c "php -S 0.0.0.0:8000 -t /var/www/html/public 2>&1"
+
+  # ============================================
+  # NGINX (Reverse Proxy)
+  # ============================================
+
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: nginx_wassel
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d
+      - ./nginx/certs:/etc/nginx/certs
+    depends_on:
+      - app.credit_sahara
+      - app.noor_bank
+    networks:
+      - wassel_network
+
+  # ============================================
+  # PHPMyAdmin (optionnel)
+  # ============================================
+
+  phpmyadmin.credit_sahara:
+    image: phpmyadmin/phpmyadmin:5.2.1
+    container_name: phpmyadmin_credit_sahara
+    environment:
+      PMA_HOST: mysql.credit_sahara
+      PMA_PORT: 3306
+      PMA_USER: root
+      PMA_PASSWORD: root_credit_sahara
+    ports:
+      - "8080:80"
+    depends_on:
+      - mysql.credit_sahara
+    networks:
+      - wassel_network
+
+  phpmyadmin.noor_bank:
+    image: phpmyadmin/phpmyadmin:5.2.1
+    container_name: phpmyadmin_noor_bank
+    environment:
+      PMA_HOST: mysql.noor_bank
+      PMA_PORT: 3306
+      PMA_USER: root
+      PMA_PASSWORD: root_noor_bank
+    ports:
+      - "8081:80"
+    depends_on:
+      - mysql.noor_bank
+    networks:
+      - wassel_network
+
+# ============================================
+# RÉSEAU
+# ============================================
+
+networks:
+  wassel_network:
+    driver: bridge
