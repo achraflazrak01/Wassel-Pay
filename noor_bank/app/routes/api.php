@@ -1,19 +1,10 @@
 <?php
 
-use Illuminate\Http\Request;
+use App\Http\Controllers\ReceiveController;
 use Illuminate\Support\Facades\Route;
 
-/*
-|--------------------------------------------------------------------------
-| API Routes
-|--------------------------------------------------------------------------
-|
-| Here is where you can register API routes for your application. These
-| routes are loaded by the RouteServiceProvider and all of them will
-| be assigned to the "api" middleware group. Make something great!
-|
-*/
+Route::post('/transfer/receive', [ReceiveController::class, 'receive']);
 
-Route::middleware('auth:sanctum')->get('/user', function (Request $request) {
-    return $request->user();
-});
+// Routes pour la rotation des clés
+Route::post('/keys/update', [App\Http\Controllers\KeyUpdateController::class, 'update']);
+Route::get('/keys/status', [App\Http\Controllers\KeyUpdateController::class, 'status']);

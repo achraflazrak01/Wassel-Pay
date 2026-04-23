@@ -4,49 +4,194 @@ namespace App\Services;
 
 class CryptoService
 {
-    private const CURVE = "prime256v1";
-    private const CIPHER = "aes-256-gcm";
-    private const SIGNATURE_ALGO = "sha256";
+    private const CURVE = 'prime256v1';
+    private const CIPHER = 'aes-256-gcm';
+    private const SIGNATURE_ALGO = OPENSSL_ALGO_SHA256;
+    
+    // ================================================================
+    // 1. GESTION DES CLÉS
+    // ================================================================
     
     public function generateKeyPair(): array
     {
         $config = [
-            "curve_name" => self::CURVE,
-            "private_key_type" => OPENSSL_KEYTYPE_EC,
+            'curve_name' => self::CURVE,
+            'private_key_type' => OPENSSL_KEYTYPE_EC,
         ];
         
         $privateKey = openssl_pkey_new($config);
         
         if ($privateKey === false) {
-            throw new \Exception("Erreur génération clé ECC: " . openssl_error_string());
+            throw new \Exception('Erreur génération clé ECC: ' . openssl_error_string());
         }
         
         openssl_pkey_export($privateKey, $privateKeyPem);
         
         $publicKeyDetails = openssl_pkey_get_details($privateKey);
-        $publicKeyPem = $publicKeyDetails["key"];
+        $publicKeyPem = $publicKeyDetails['key'];
         
         return [
-            "private" => $privateKeyPem,
-            "public" => $publicKeyPem,
+            'private' => $privateKeyPem,
+            'public' => $publicKeyPem,
         ];
     }
     
+    // ================================================================
+    // 2. SIGNATURE ECDSA
+    // ================================================================
+    
     public function sign(string $data, string $privateKey): string
     {
-        openssl_sign($data, $signature, $privateKey, self::SIGNATURE_ALGO);
+        $key = openssl_pkey_get_private($privateKey);
+        openssl_sign($data, $signature, $key, self::SIGNATURE_ALGO);
         return base64_encode($signature);
     }
     
     public function verify(string $data, string $signature, string $publicKey): bool
     {
-        $result = openssl_verify($data, base64_decode($signature), $publicKey, self::SIGNATURE_ALGO);
+        $key = openssl_pkey_get_public($publicKey);
+        
+        if ($key === false) {
+            throw new \Exception('Clé publique invalide: ' . openssl_error_string());
+        }
+        
+        $result = openssl_verify($data, base64_decode($signature), $key, self::SIGNATURE_ALGO);
+        
+        if ($result === -1) {
+            throw new \Exception('Erreur vérification: ' . openssl_error_string());
+        }
+        
         return $result === 1;
     }
     
+    // ================================================================
+    // 3. CHIFFREMENT HYBRIDE ECC + AES-256-GCM
+    // ================================================================
+    
+    private function deriveSharedSecret(string $privateKey, string $peerPublicKey): string
+    {
+        $priv = openssl_pkey_get_private($privateKey);
+        $pub = openssl_pkey_get_public($peerPublicKey);
+        
+        if ($priv === false || $pub === false) {
+            throw new \Exception('Impossible de dériver le secret partagé');
+        }
+        
+        $secret = openssl_pkey_derive($pub, $priv, 256);
+        
+        if ($secret === false) {
+            throw new \Exception('Erreur dérivation ECDH: ' . openssl_error_string());
+        }
+        
+        return $secret;
+    }
+    
+    private function encryptSessionKeyWithECDH(string $sessionKey, string $recipientPublicKey): string
+    {
+        $config = [
+            'curve_name' => self::CURVE,
+            'private_key_type' => OPENSSL_KEYTYPE_EC,
+        ];
+        $ephemeralKey = openssl_pkey_new($config);
+        openssl_pkey_export($ephemeralKey, $ephemeralPrivate);
+        
+        $ephemeralDetails = openssl_pkey_get_details($ephemeralKey);
+        $ephemeralPublic = $ephemeralDetails['key'];
+        
+        $sharedSecret = $this->deriveSharedSecret($ephemeralPrivate, $recipientPublicKey);
+        
+        $iv = random_bytes(12);
+        $encryptedKey = openssl_encrypt($sessionKey, self::CIPHER, $sharedSecret, OPENSSL_RAW_DATA, $iv, $tag);
+        
+        return base64_encode($ephemeralPublic) . ':' . 
+               base64_encode($iv) . ':' . 
+               base64_encode($encryptedKey) . ':' . 
+               base64_encode($tag);
+    }
+    
+    private function decryptSessionKeyWithECDH(string $encryptedData, string $recipientPrivateKey): string
+    {
+        $parts = explode(':', $encryptedData);
+        if (count($parts) !== 4) {
+            throw new \Exception('Format de clé session invalide');
+        }
+        
+        list($ephemeralPublicB64, $ivB64, $encryptedKeyB64, $tagB64) = $parts;
+        
+        $ephemeralPublic = base64_decode($ephemeralPublicB64);
+        $iv = base64_decode($ivB64);
+        $encryptedKey = base64_decode($encryptedKeyB64);
+        $tag = base64_decode($tagB64);
+        
+        $sharedSecret = $this->deriveSharedSecret($recipientPrivateKey, $ephemeralPublic);
+        
+        $sessionKey = openssl_decrypt($encryptedKey, self::CIPHER, $sharedSecret, OPENSSL_RAW_DATA, $iv, $tag);
+        
+        if ($sessionKey === false) {
+            throw new \Exception('Erreur déchiffrement clé session');
+        }
+        
+        return $sessionKey;
+    }
+    
+    public function encryptHybrid(string $data, string $recipientPublicKey): array
+    {
+        $sessionKey = random_bytes(32);
+        $nonce = random_bytes(12);
+        
+        $ciphertext = openssl_encrypt(
+            $data,
+            self::CIPHER,
+            $sessionKey,
+            OPENSSL_RAW_DATA,
+            $nonce,
+            $tag
+        );
+        
+        if ($ciphertext === false) {
+            throw new \Exception('Erreur chiffrement AES: ' . openssl_error_string());
+        }
+        
+        $encryptedSessionKey = $this->encryptSessionKeyWithECDH($sessionKey, $recipientPublicKey);
+        
+        return [
+            'encrypted_session_key' => base64_encode($encryptedSessionKey),
+            'nonce' => base64_encode($nonce),
+            'ciphertext' => base64_encode($ciphertext),
+            'tag' => base64_encode($tag),
+        ];
+    }
+    
+    public function decryptHybrid(array $packet, string $recipientPrivateKey): string
+    {
+        $sessionKey = $this->decryptSessionKeyWithECDH(
+            base64_decode($packet['encrypted_session_key']),
+            $recipientPrivateKey
+        );
+        
+        $plaintext = openssl_decrypt(
+            base64_decode($packet['ciphertext']),
+            self::CIPHER,
+            $sessionKey,
+            OPENSSL_RAW_DATA,
+            base64_decode($packet['nonce']),
+            base64_decode($packet['tag'])
+        );
+        
+        if ($plaintext === false) {
+            throw new \Exception('Erreur déchiffrement AES: ' . openssl_error_string());
+        }
+        
+        return $plaintext;
+    }
+    
+    // ================================================================
+    // 4. ANTI-REJEU
+    // ================================================================
+    
     public static function generateUuid(): string
     {
-        return sprintf("%04x%04x-%04x-%04x-%04x-%04x%04x%04x",
+        return sprintf('%04x%04x-%04x-%04x-%04x-%04x%04x%04x',
             random_int(0, 0xffff), random_int(0, 0xffff),
             random_int(0, 0xffff),
             random_int(0, 0x0fff) | 0x4000,
